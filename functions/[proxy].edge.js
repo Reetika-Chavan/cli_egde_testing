@@ -1,32 +1,94 @@
-export default async function handler(request, context) {
-  const parsedUrl = new URL(request.url);
-  const route = parsedUrl.pathname;
+const PROTECTED_DOMAIN = "cliegdetesting.devcontentstackapps.com";
+const UNPROTECTED_DOMAIN = "test-unprotected-domain.devcontentstackapps.com";
 
-  /** Redirect — /test1 to /test2 (same pattern as Launch edge-functions redirect docs) */
-  if (route === "/test1") {
-    const modifiedUrl = new URL(request.url);
-    modifiedUrl.pathname = "/test2";
-    return Response.redirect(modifiedUrl, 308);
+export default async function handler(request, context) {
+  const url = new URL(request.url);
+  const hostname = url.hostname;
+  console.log("hostname:", hostname);
+
+  if (hostname.includes(PROTECTED_DOMAIN)) {
+    console.log("protected domain");
+    const authHeader = request.headers.get("Authorization");
+
+    if (!authHeader || !authHeader.startsWith("Basic ")) {
+      return new Response("Authentication Required", {
+        status: 401,
+        headers: {
+          "WWW-Authenticate": 'Basic realm="Protected Area"',
+          "Content-Type": "text/html",
+        },
+      });
+    }
+
+    try {
+      const base64Credentials = authHeader.split(" ")[1];
+      const credentials = atob(base64Credentials);
+      const [username, password] = credentials.split(":");
+
+      if (username === "admin" && password === "admin") {
+        // continue
+      } else {
+        return new Response("Unauthorized - Invalid credentials", {
+          status: 401,
+          headers: { "Content-Type": "text/plain" },
+        });
+      }
+    } catch {
+      return new Response("Unauthorized - Invalid auth format", {
+        status: 401,
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
+  } else if (hostname.includes(UNPROTECTED_DOMAIN)) {
+    return fetch(request);
   }
 
-  
+  const route = url.pathname;
+
+  /**
+   * Edge URL Redirect — equivalent to launch.json redirects[] (source → destination, statusCode, response.headers).
+   * /test1 → /test2, 308, x-powered-by: launch
+   */
+  if (route === "/test1") {
+    const destination = new URL(request.url);
+    destination.pathname = "/test2";
+    const headers = new Headers();
+    headers.set("Location", destination.href);
+    headers.set("x-powered-by", "launch");
+    return new Response(null, { status: 308, headers });
+  }
+
+  /**
+   * Edge URL Rewrite — equivalent to launch.json rewrites[] (source → destination, request/response headers).
+   * /test3 internally fetches /test2; optional x-api-key on upstream request, x-powered-by on client response.
+   */
   if (route === "/test3") {
     const rewriteUrl = new URL(request.url);
     rewriteUrl.pathname = "/test2";
-    return fetch(new Request(rewriteUrl.toString(), request));
+    const upstreamHeaders = new Headers(request.headers);
+    upstreamHeaders.set("x-api-key", "api-key");
+    const rewriteRequest = new Request(rewriteUrl.href, {
+      method: request.method,
+      headers: upstreamHeaders,
+      body: request.body,
+    });
+    const upstreamResponse = await fetch(rewriteRequest);
+    const responseHeaders = new Headers(upstreamResponse.headers);
+    responseHeaders.set("x-powered-by", "launch");
+    return new Response(upstreamResponse.body, {
+      status: upstreamResponse.status,
+      statusText: upstreamResponse.statusText,
+      headers: responseHeaders,
+    });
   }
 
-  /** Launch Edge Function Request Object — Client IP */
   request.headers.get("x-forwarded-for");
 
-  /** Launch Edge Functions Context Object — Environment Variables */
   const testKeyValue = context.env.TEST_KEY;
   console.log("TEST_KEY", testKeyValue);
 
-  /** waitUntil */
   context.waitUntil(Promise.resolve());
 
-  /** Example — JSON response for /appliances */
   if (route === "/appliances") {
     const response = {
       time: new Date(),
@@ -34,12 +96,10 @@ export default async function handler(request, context) {
     return new Response(JSON.stringify(response));
   }
 
-  /** Handling Routes at Edge — POST /appliances (docs path; isolated as /appliances-post) */
   if (route === "/appliances-post" && request.method === "POST") {
     return fetch(`https://example.com/api/appliances/new`);
   }
 
-  /** Modify Request and Response */
   if (route === "/modify-demo") {
     const requestBody = await request.json();
     const modifiedRequest = new Request(request, {
@@ -69,13 +129,11 @@ export default async function handler(request, context) {
     return modifiedResponse;
   }
 
-  /** Redirect to a URL — POST /appliances (docs path; isolated as /appliances-redirect) */
   if (route === "/appliances-redirect" && request.method === "POST") {
     const modifiedUrl = new URL(request.url);
     modifiedUrl.pathname = "/appliances/new";
     return Response.redirect(modifiedUrl, 301);
   }
 
-  /** Forward Requests to the Launch Origin Server */
   return fetch(request);
 }
