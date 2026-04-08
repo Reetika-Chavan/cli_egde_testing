@@ -1,12 +1,18 @@
-const PROTECTED_DOMAIN = "cliegdetesting.devcontentstackapps.com";
+const PROTECTED_DOMAIN = "localhost";
+const PROTECTED_PORT = "8787";
 const UNPROTECTED_DOMAIN = "test-unprotected-domain.devcontentstackapps.com";
+
+function isProtectedHost(hostname, port) {
+  if (hostname === PROTECTED_DOMAIN && port === PROTECTED_PORT) return true;
+  return hostname.includes("devcontentstackapps.com");
+}
 
 export default async function handler(request, context) {
   const url = new URL(request.url);
   const hostname = url.hostname;
   console.log("hostname:", hostname);
 
-  if (hostname.includes(PROTECTED_DOMAIN)) {
+  if (isProtectedHost(hostname, url.port)) {
     console.log("protected domain");
     const authHeader = request.headers.get("Authorization");
 
@@ -96,40 +102,94 @@ export default async function handler(request, context) {
     return new Response(JSON.stringify(response));
   }
 
-  if (route === "/appliances-post" && request.method === "POST") {
-    return fetch(`https://example.com/api/appliances/new`);
+  if (route === "/appliances-post") {
+    const upstream = "https://example.com/api/appliances/new";
+    const method = request.method;
+    const hasBody =
+      method !== "GET" && method !== "HEAD" && request.body != null;
+    return fetch(upstream, {
+      method,
+      headers: request.headers,
+      ...(hasBody ? { body: request.body } : {}),
+    });
   }
 
   if (route === "/modify-demo") {
-    const requestBody = await request.json();
-    const modifiedRequest = new Request(request, {
+    const method = request.method;
+    if (method === "GET" || method === "HEAD") {
+      return new Response(
+        JSON.stringify({
+          message:
+            "This path runs the Launch “modify request/response” demo. Send POST with a JSON body (e.g. {}).",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    let requestBody = {};
+    try {
+      const raw = await request.text();
+      if (raw && raw.trim()) {
+        requestBody = JSON.parse(raw);
+      }
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "Request body must be valid JSON" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    const reqHeaders = new Headers(request.headers);
+    reqHeaders.set("Content-Type", "application/json");
+    const modifiedRequest = new Request(request.url, {
       body: JSON.stringify({
         ...requestBody,
         foo: "bar",
       }),
       method: "POST",
+      headers: reqHeaders,
     });
-    modifiedRequest.headers.set("Content-Type", "application/json");
     const modifiedUrl = new URL(request.url);
     modifiedUrl.search = "?id=1";
-    const requestWithModifiedUrl = new Request(
-      modifiedUrl.toString(),
-      modifiedRequest,
-    );
+    const requestWithModifiedUrl = new Request(modifiedUrl.toString(), {
+      method: modifiedRequest.method,
+      headers: modifiedRequest.headers,
+      body: modifiedRequest.body,
+    });
     const response = await fetch(requestWithModifiedUrl);
-    const responseBody = await response.json();
-    const modifiedResponse = new Response(
+    const responseText = await response.text();
+    let responseBody;
+    try {
+      responseBody = responseText && responseText.trim() ? JSON.parse(responseText) : {};
+    } catch {
+      return new Response(
+        JSON.stringify({
+          error: "Upstream response was not JSON",
+          status: response.status,
+          hint: "The demo expects JSON from the origin (e.g. an API).",
+        }),
+        { status: 502, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    const outHeaders = new Headers(response.headers);
+    outHeaders.set("X-Message", "Modified response headers");
+    return new Response(
       JSON.stringify({
         ...responseBody,
         time: new Date(),
       }),
-      response,
+      {
+        status: response.status,
+        statusText: response.statusText,
+        headers: outHeaders,
+      },
     );
-    modifiedResponse.headers.set("X-Message", "Modified response headers");
-    return modifiedResponse;
   }
 
-  if (route === "/appliances-redirect" && request.method === "POST") {
+  if (route === "/appliances-redirect") {
     const modifiedUrl = new URL(request.url);
     modifiedUrl.pathname = "/appliances/new";
     return Response.redirect(modifiedUrl, 301);
